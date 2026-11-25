@@ -25,6 +25,7 @@
 
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/internal/litert_shared_library.h"  // from @litert
 #include "litert/cc/litert_compiled_model.h"  // from @litert
@@ -40,6 +41,7 @@
 #include "litert/cc/litert_tensor_buffer_types.h"  // from @litert
 #include "runtime/components/sampler.h"
 #include "runtime/executor/executor_settings_base.h"
+#include "runtime/executor/llm_executor_settings.h"
 #include "runtime/proto/sampler_params.pb.h"
 
 // What the shared MTP drafter needs from NVIDIA's TensorRT-RTX backend, which
@@ -60,6 +62,50 @@ namespace litert::lm {
 // runtime context).
 absl::StatusOr<std::optional<SharedLibrary>> LoadedDispatchLibrary(
     const Environment& env);
+
+// Selects the signatures that an executor of `model` on NVIDIA's TensorRT-RTX
+// backend compiles when its caller selected none: all of them except the
+// prefill signatures smaller than the largest one. TensorRT-RTX builds an
+// engine for every selected signature when the model loads, so each one costs
+// load time and device memory. With the largest prefill signature alone, a
+// shorter input runs padded in it, and a prefill needs that many free entries
+// in the context. The other signatures (decode, verify) stay, and so do the
+// features that run them. A caller that wants another trade-off selects the
+// signatures itself.
+//
+// `input_positions_name` names the input whose shape gives a prefill signature
+// its length. `executor_settings` is left as it is for a caller that selected
+// signatures, on other backends, when `env` does not take its dispatch library
+// from a directory that holds NVIDIA's, and for a model without several
+// prefill signatures to choose from.
+//
+// An executor on NVIDIA's backend also gets the cache locations of
+// SetDefaultNvidiaCacheLocations, whether or not its caller selected
+// signatures.
+absl::Status SelectDefaultNvidiaSignatures(
+    const Environment& env, const Model& model,
+    absl::string_view input_positions_name,
+    LlmExecutorSettings& executor_settings);
+
+// Gives NVIDIA's compiler plugin and dispatch library a place to keep the
+// engines that TensorRT-RTX builds when the model of `model_assets` loads, so
+// that the next load of the same model file reads them instead of building
+// them again. The place is next to the model file: the folders
+// litert_nvidia_tensorrt_aot_cache and litert_nvidia_dispatch_runtime_cache.
+//
+// The two libraries read these folders, and the model file that identifies a
+// cached engine, from the environment variables
+// LITERT_NVIDIA_TENSORRT_AOT_CACHE_DIR,
+// LITERT_NVIDIA_DISPATCH_RUNTIME_CACHE_DIR and
+// LITERT_NVIDIA_TENSORRT_AOT_MODEL_PATH, which this sets for the process. An
+// environment that names any of them itself keeps its own values and gets none
+// from here. Nothing is set for a model that was not loaded from a path, when
+// the folders cannot be created, or on Windows for a model path with other
+// than ASCII characters: the engines are then built at every load.
+//
+// The variables belong to the process, so they follow the model that loaded
+// last: models that load at the same time have to be the same file.
+void SetDefaultNvidiaCacheLocations(const ModelAssets& model_assets);
 
 // Whether the base model stores a logical [1, H, D, S] value cache in NVIDIA's
 // physical [1, H, S, D] layout, from the producer's buffer requirements: true
